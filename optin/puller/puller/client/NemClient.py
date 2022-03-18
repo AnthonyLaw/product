@@ -24,6 +24,17 @@ class NemClient(BasicClient):
 
 		return await self.height() - 360
 
+	async def announce(self, request):
+		"""Announces serialized transaction."""
+
+		return await self.post('transaction/announce', request)
+
+	async def node_time(self):
+		"""Gets node time."""
+
+		nis_info = await self.get('node/extended-info', 'nisInfo')
+		return NetworkTimestamp(nis_info['currentTime'])
+
 	async def node_network(self):
 		"""Gets node network."""
 
