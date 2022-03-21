@@ -3,6 +3,7 @@
 import asyncio
 import json
 from binascii import hexlify, unhexlify
+from collections import namedtuple
 
 from symbolchain.Bip32 import Bip32
 from symbolchain.CryptoTypes import PrivateKey, PublicKey
@@ -11,6 +12,9 @@ from symbolchain.facade.NemFacade import NemFacade
 from symbolchain.nc import Amount
 
 from client.NemClient import NemClient
+
+
+NemAccount = namedtuple('NemAccount', ['key_pair', 'address'])
 
 def to_hex_string(buffer):
 	return hexlify(buffer.encode('utf8')).decode('utf8')
@@ -26,8 +30,8 @@ def derive_key(root_node, facade, change, index):
 	return (path, child_key_pair, address)
 
 
-async def prepare_multisig(nem_facade, nem_client, nem_network_time, nem_kp, multisig_id, cosigatory_ids, min_approval_delta):
-	key_pair = nem_kp(multisig_id)
+async def prepare_multisig(nem_facade, nem_client, nem_network_time, nem_accounts, multisig_id, cosigatory_ids, min_approval_delta):
+	key_pair = nem_accounts[multisig_id].key_pair
 	multisig_address = nem_facade.network.public_key_to_address(key_pair.public_key)
 	result = await nem_client.account(multisig_address)
 	print(multisig_address)
@@ -35,11 +39,18 @@ async def prepare_multisig(nem_facade, nem_client, nem_network_time, nem_kp, mul
 	print('....')
 
 	def id_to_modification(key_id):
-		return {'modification': {'modification_type': 'add_cosignatory', 'cosignatory_public_key': nem_kp(key_id).public_key}}
+		return {'modification': {
+			'modification_type': 'add_cosignatory',
+			'cosignatory_public_key': nem_accounts[key_id].key_pair.public_key
+		}}
 
 	# already multisig
 	if result['meta']['cosignatories']:
 		return
+
+	def monkey_patch(modifications):
+		modifications.sort(key=lambda e: nem_facade.network.public_key_to_address(e['modification']['cosignatory_public_key']))
+		return modifications
 
 	transaction = nem_facade.transaction_factory.create({
 		'type': 'multisig_account_modification_transaction',
@@ -48,7 +59,7 @@ async def prepare_multisig(nem_facade, nem_client, nem_network_time, nem_kp, mul
 		'deadline': nem_network_time.add_hours(1).timestamp,
 		'fee': 500000,
 		'min_approval_delta': min_approval_delta,
-		'modifications': list(map(id_to_modification, cosigatory_ids))
+		'modifications': monkey_patch(list(map(id_to_modification, cosigatory_ids)))
 	})
 	signature = nem_facade.sign_transaction(key_pair, transaction)
 	payload = nem_facade.transaction_factory.attach_signature(transaction, signature)
@@ -60,9 +71,9 @@ async def prepare_multisig(nem_facade, nem_client, nem_network_time, nem_kp, mul
 	print(result)
 
 
-async def prepare_transfer(nem_facade, nem_client, nem_network_time, nem_kp, signer_id):
-	key_pair = nem_kp(signer_id)
-	signer_address = nem_facade.network.public_key_to_address(key_pair.public_key)
+async def prepare_transfer(nem_facade, nem_client, nem_network_time, nem_accounts, signer_id):
+	key_pair = nem_accounts[signer_id].key_pair
+	signer_address = nem_accounts[signer_id].address
 	result = await nem_client.account(signer_address)
 	print(signer_address)
 	print(result)
@@ -101,9 +112,11 @@ async def main():
 	# verify addresses
 	nem_facade = NemFacade('testnet')
 	optin_destination_account = nem_facade.network.public_key_to_address(PublicKey(to_hex_string('testnet optin destination #00002')))
+	nem_accounts = []
 	for entry in accounts:
 		key_pair = nem_facade.KeyPair(PrivateKey(unhexlify(entry[1])))
 		nem_address = nem_facade.network.public_key_to_address(key_pair.public_key)
+		nem_accounts.append(NemAccount(key_pair, nem_address))
 		assert entry[0] == str(nem_address)
 
 
@@ -113,9 +126,6 @@ async def main():
 	nem_client = NemClient('http://hugetestalice2.nem.ninja:7890')
 	nem_network_time = await nem_client.node_time()
 
-	def nem_kp(index):
-		return nem_facade.KeyPair(PrivateKey(unhexlify(accounts[index][1])))
-
 	# accounts layout (0-based)
 	# 1-6 single
 	#
@@ -123,11 +133,12 @@ async def main():
 	# 14 - multisig v1 3-of-3, cosigs: 10, 11, 12
 
 	# just a test transfer to verify if account #14 private key is correct
-	# await prepare_transfer(nem_facade, nem_client, nem_network_time, nem_kp, 14)
+	# await prepare_transfer(nem_facade, nem_client, nem_network_time, nem_accounts, 14)
 
-	await prepare_multisig(nem_facade, nem_client, nem_network_time, nem_kp, 14, [10, 11, 12], 3)
+	await prepare_multisig(nem_facade, nem_client, nem_network_time, nem_accounts, 14, [10, 11, 12], 3)
+
 	print('---')
-	await prepare_multisig(nem_facade, nem_client, nem_network_time, nem_kp, 13, [7, 8, 9], 2)
+	await prepare_multisig(nem_facade, nem_client, nem_network_time, nem_accounts, 13, [7, 8, 9], 2)
 
 	return
 
